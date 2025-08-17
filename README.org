@@ -1,0 +1,59 @@
+* package-retry.el
+
+Add retry functionality to Emacs package.el.
+
+** Overview
+
+Package installation sometimes fails due to temporary network issues or server problems. This package provides automatic retry functionality with configurable delay and retry count.
+
+** Installation
+
+1. Place =package-retry.el= in your load-path
+2. Add the following to your =.emacs= or =init.el=:
+
+#+BEGIN_SRC elisp
+  (use-package package-retry
+    :vc ( :url "https://github.com/kn66/package-retry.el.git"
+          :rev :newest)
+    :config
+    (package-retry-mode +1))
+#+END_SRC
+
+** Customization
+
+Use =M-x customize-group RET package-retry RET= for GUI customization.
+
+*** Customizable Variables
+
+| Variable                       | Description                    | Default |
+|--------------------------------+--------------------------------+---------|
+| =package-retry-max-attempts=  | Maximum number of retry attempts |       5 |
+| =package-retry-delay=         | Delay between retries (seconds) |       3 |
+| =package-retry-enable-message= | Show/hide retry messages       |       t |
+
+** How It Works
+
+*** Retry Logic
+
+When package installation fails:
+
+1. Catch the error
+2. If max retry count not reached, wait and retry
+3. If max retry count reached, re-signal original error
+4. If successful, return the result
+
+*** Example Messages
+
+#+BEGIN_EXAMPLE
+Retrying package installation (1/5): some-package
+Package installation failed (attempt 1/5): some-package - Error message
+Package installation failed after 5 attempts: some-package
+#+END_EXAMPLE
+
+** License
+
+MIT license
+
+** Contributing
+
+Bug reports and feature requests are welcome via GitHub Issues.
