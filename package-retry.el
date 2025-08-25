@@ -25,10 +25,11 @@
 
 ;;; Commentary:
 
-;; This package adds retry functionality to Emacs package.el.
-;; Package installation sometimes fails due to temporary network issues
+;; This package adds retry functionality to Emacs package.el download operations.
+;; Package downloads sometimes fail due to temporary network issues
 ;; or server problems. This package automatically retries failed
-;; installations with configurable delay and retry count.
+;; download operations only (not build/compilation) with configurable
+;; delay and retry count.
 
 ;; Usage:
 ;;   (require 'package-retry)
@@ -42,12 +43,12 @@
 (require 'package)
 
 (defgroup package-retry nil
-  "Add retry functionality to package installation."
+  "Add retry functionality to package downloads."
   :group 'package
   :prefix "package-retry-")
 
 (defcustom package-retry-max-attempts 5
-  "Maximum number of retry attempts for package installation.
+  "Maximum number of retry attempts for package downloads.
 Set to 1 to disable retry functionality."
   :type 'integer
   :group 'package-retry)
@@ -58,30 +59,29 @@ Set to 1 to disable retry functionality."
   :group 'package-retry)
 
 (defcustom package-retry-enable-message t
-  "Whether to show retry messages during package installation."
+  "Whether to show retry messages during package downloads."
   :type 'boolean
   :group 'package-retry)
 
-(defun package-retry--install-with-retry (orig-fun package &rest args)
-  "Advice function to add retry functionality to package-install.
-ORIG-FUN is the original function, PACKAGE is the package to install,
-and ARGS are additional arguments passed to the original function."
+(defun package-retry--download-with-retry (orig-fun pkg-desc)
+  "Advice function to add retry functionality to package-install-from-archive.
+ORIG-FUN is the original function, PKG-DESC is the package descriptor."
   (let ((retry-count 0)
         (max-retries package-retry-max-attempts)
         (delay package-retry-delay)
+        (package-name (package-desc-name pkg-desc))
         success
         result)
     (while (and (< retry-count max-retries) (not success))
       (condition-case err
           (progn
             (when (and (> retry-count 0) package-retry-enable-message)
-              (message "Retrying package installation (%d/%d): %s"
-                       retry-count max-retries
-                       (if (package-desc-p package)
-                           (package-desc-name package)
-                         package))
+              (message "Retrying package download (%d/%d): %s"
+                       retry-count
+                       max-retries
+                       package-name)
               (sleep-for delay))
-            (setq result (apply orig-fun package args))
+            (setq result (funcall orig-fun pkg-desc))
             (setq success t))
         (error
          (setq retry-count (1+ retry-count))
@@ -89,42 +89,41 @@ and ARGS are additional arguments passed to the original function."
              (progn
                (when package-retry-enable-message
                  (message
-                  "Package installation failed after %d attempts: %s"
-                  max-retries
-                  (if (package-desc-p package)
-                      (package-desc-name package)
-                    package)))
+                  "Package download failed after %d attempts: %s"
+                  max-retries package-name))
                (signal (car err) (cdr err)))
            (when package-retry-enable-message
              (message
-              "Package installation failed (attempt %d/%d): %s - %s"
+              "Package download failed (attempt %d/%d): %s - %s"
               retry-count
               max-retries
-              (if (package-desc-p package)
-                  (package-desc-name package)
-                package)
+              package-name
               (error-message-string err)))))))
     result))
 
 ;;;###autoload
 (define-minor-mode package-retry-mode
-  "Toggle package retry functionality.
-When enabled, failed package installations will be automatically
+  "Toggle package download retry functionality.
+When enabled, failed package downloads will be automatically
 retried according to `package-retry-max-attempts' and
 `package-retry-delay' settings."
   :global t
   :group 'package-retry
-  :lighter " PkgRetry"
+  :lighter
+  " PkgRetry"
   (if package-retry-mode
       (unless (advice-member-p
-               #'package-retry--install-with-retry 'package-install)
+               #'package-retry--download-with-retry
+               'package-install-from-archive)
         (advice-add
-         'package-install
-         :around #'package-retry--install-with-retry))
+         'package-install-from-archive
+         :around #'package-retry--download-with-retry))
     (when (advice-member-p
-           #'package-retry--install-with-retry 'package-install)
+           #'package-retry--download-with-retry
+           'package-install-from-archive)
       (advice-remove
-       'package-install #'package-retry--install-with-retry))))
+       'package-install-from-archive
+       #'package-retry--download-with-retry))))
 
 (provide 'package-retry)
 
