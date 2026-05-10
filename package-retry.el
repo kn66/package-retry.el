@@ -27,7 +27,7 @@
 
 ;; This package adds retry functionality to Emacs package.el download operations.
 ;; Package downloads sometimes fail due to temporary network issues
-;; or server problems. This package automatically retries failed
+;; or server problems.  This package automatically retries failed
 ;; download operations only (not build/compilation) with configurable
 ;; delay and retry count.
 
@@ -67,39 +67,128 @@ Must be a non-negative number."
   :type 'boolean
   :group 'package-retry)
 
-(defun package-retry--download-with-retry (orig-fun pkg-desc)
-  "Advice function to add retry functionality to package-install-from-archive.
-ORIG-FUN is the original function, PKG-DESC is the package descriptor."
-  (let* ((max-attempts (max 1 package-retry-max-attempts))
-         (delay (max 0 package-retry-delay))
-         (package-name (package-desc-name pkg-desc))
-         (current-attempt 1)
-         success
-         result)
-    (while (and (<= current-attempt max-attempts) (not success))
+(defvar package-retry--in-package-install nil
+  "Non-nil while the compatibility advice handles a package install.")
+
+(defun package-retry--download-name (url args)
+  "Return a human-readable download name from URL and ARGS."
+  (let ((file (plist-get args :file)))
+    (if file
+        (concat url file)
+      url)))
+
+(defun package-retry--with-retry (thunk download-name &optional retry-p)
+  "Call THUNK, retrying errors for DOWNLOAD-NAME.
+When RETRY-P is non-nil, call it with the error data before
+retrying.  If RETRY-P returns nil, signal the error immediately."
+  (let ((max-attempts (max 1 package-retry-max-attempts))
+        (delay (max 0 package-retry-delay))
+        (attempt 1)
+        result
+        done)
+    (while (not done)
       (condition-case err
-          (progn
-            (setq result (funcall orig-fun pkg-desc))
-            (setq success t))
+          (setq result (funcall thunk)
+                done t)
         (error
-         (if (>= current-attempt max-attempts)
-             (progn
-               (when package-retry-enable-message
-                 (message
-                  "Package download failed after %d attempts: %s"
-                  max-attempts package-name))
-               (signal (car err) (cdr err)))
-           (when package-retry-enable-message
-             (message
-              "Package download failed (attempt %d/%d): %s - %s. Retrying in %d seconds..."
-              current-attempt
-              max-attempts
-              package-name
-              (error-message-string err)
-              delay))
-           (sleep-for delay)
-           (setq current-attempt (1+ current-attempt))))))
+         (let ((retryable (if retry-p (funcall retry-p err) t)))
+           (cond
+            ((not retryable)
+             (signal (car err) (cdr err)))
+            ((>= attempt max-attempts)
+             (when (and package-retry-enable-message
+                        (> max-attempts 1))
+               (message
+                "Package download failed after %d attempts: %s"
+                max-attempts download-name))
+             (signal (car err) (cdr err)))
+            (t
+             (when package-retry-enable-message
+               (message
+                "Package download failed (attempt %d/%d): %s - %s. Retrying in %s seconds..."
+                attempt
+                max-attempts
+                download-name
+                (error-message-string err)
+                delay))
+             (sleep-for delay)
+             (setq attempt (1+ attempt))))))))
     result))
+
+(defun package-retry--with-response-buffer-retry (orig-fun url body &rest args)
+  "Advice around `package--with-response-buffer-1'.
+ORIG-FUN is the original function.  URL, BODY, and ARGS are its
+arguments.  Only errors raised while retrieving the response are
+retried; errors from BODY are signaled without retrying."
+  (if (plist-get args :async)
+      (apply orig-fun url body args)
+    (let (body-failed)
+      (package-retry--with-retry
+       (lambda ()
+         (setq body-failed nil)
+         (apply orig-fun
+                url
+                (lambda ()
+                  (condition-case err
+                      (funcall body)
+                    (error
+                     (setq body-failed t)
+                     (signal (car err) (cdr err)))))
+                args))
+       (package-retry--download-name url args)
+       (lambda (_err)
+         (not body-failed))))))
+
+(defun package-retry--package-install-context (orig-fun &rest args)
+  "Bind retry context around ORIG-FUN for older Emacs versions.
+ARGS are passed through to ORIG-FUN."
+  (let ((package-retry--in-package-install t))
+    (apply orig-fun args)))
+
+(defun package-retry--url-insert-file-contents-retry
+    (orig-fun url &rest args)
+  "Advice around `url-insert-file-contents' for older Emacs.
+ORIG-FUN is the original function.  URL and ARGS are its
+arguments."
+  (if package-retry--in-package-install
+      (package-retry--with-retry
+       (lambda ()
+         (apply orig-fun url args))
+       url)
+    (apply orig-fun url args)))
+
+(defun package-retry--advice-add-once (symbol where function)
+  "Add FUNCTION as advice to SYMBOL at WHERE unless already present."
+  (unless (advice-member-p function symbol)
+    (advice-add symbol where function)))
+
+(defun package-retry--enable ()
+  "Enable package download retry advice."
+  (if (fboundp 'package--with-response-buffer-1)
+      (package-retry--advice-add-once
+       'package--with-response-buffer-1
+       :around
+       #'package-retry--with-response-buffer-retry)
+    (require 'url-handlers)
+    (package-retry--advice-add-once
+     'package-install-from-archive
+     :around
+     #'package-retry--package-install-context)
+    (package-retry--advice-add-once
+     'url-insert-file-contents
+     :around
+     #'package-retry--url-insert-file-contents-retry)))
+
+(defun package-retry--disable ()
+  "Disable package download retry advice."
+  (when (fboundp 'package--with-response-buffer-1)
+    (advice-remove 'package--with-response-buffer-1
+                   #'package-retry--with-response-buffer-retry))
+  (advice-remove 'package-install-from-archive
+                 #'package-retry--package-install-context)
+  (when (fboundp 'url-insert-file-contents)
+    (advice-remove 'url-insert-file-contents
+                   #'package-retry--url-insert-file-contents-retry)))
 
 ;;;###autoload
 (define-minor-mode package-retry-mode
@@ -110,10 +199,8 @@ retried according to `package-retry-max-attempts' and
   :global t
   :group 'package-retry
   (if package-retry-mode
-      (advice-add 'package-install-from-archive
-                  :around #'package-retry--download-with-retry)
-    (advice-remove 'package-install-from-archive
-                   #'package-retry--download-with-retry)))
+      (package-retry--enable)
+    (package-retry--disable)))
 
 (defun package-retry-unload-function ()
   "Unload function for package-retry.

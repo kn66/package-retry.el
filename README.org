@@ -4,7 +4,7 @@ Add retry functionality to Emacs package.el download operations.
 
 ** What It Does
 
-Package downloads sometimes fail due to network issues or server problems. This package automatically retries failed downloads (not builds or compilation) with configurable settings.
+Package downloads sometimes fail due to network issues or server problems. This package automatically retries failed synchronous downloads with configurable settings. Package unpacking, build, and compilation errors are not retried.
 
 ** Usage
 
@@ -31,11 +31,12 @@ Package downloads sometimes fail due to network issues or server problems. This 
 
 ** How It Works
 
-The package adds advice to =package-install-from-archive= to retry failed downloads:
+On Emacs 25.1 or later, the package adds advice to package.el's internal response retrieval function so only retrieval errors are retried. On older Emacs versions, it falls back to retrying =url-insert-file-contents= while =package-install-from-archive= is running.
 
 1. Download fails → wait and retry
-2. Max attempts reached → show original error
-3. Success → continue normally
+2. Package unpack/build fails → show the original error without retrying
+3. Max attempts reached → show the original download error
+4. Success → continue normally
 
 ** License
 
