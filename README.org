@@ -19,11 +19,15 @@ Package downloads sometimes fail due to network issues or server problems. This 
 
 *** Customizable Variables
 
-| Variable                       | Description                     | Default |
-|--------------------------------+---------------------------------+---------|
-| =package-retry-max-attempts=   | Maximum retry attempts          |       5 |
-| =package-retry-delay=          | Delay between retries (seconds) |       3 |
-| =package-retry-enable-message= | Show retry messages             |       t |
+| Variable                         | Description                            | Default |
+|----------------------------------+----------------------------------------+---------|
+| =package-retry-max-attempts=     | Maximum total attempts                 |       5 |
+| =package-retry-delay=            | Initial retry delay in seconds         |       3 |
+| =package-retry-backoff-factor=   | Delay multiplier after each failure    |       2 |
+| =package-retry-max-delay=        | Maximum retry delay in seconds         |      30 |
+| =package-retry-jitter=           | Random delay variation                 |     0.1 |
+| =package-retry-predicate=        | Function deciding whether to retry     | default |
+| =package-retry-enable-message=   | Show retry messages                    |       t |
 
 *** Customize Group
 
@@ -33,10 +37,16 @@ Package downloads sometimes fail due to network issues or server problems. This 
 
 On Emacs 25.1 or later, the package adds advice to package.el's internal response retrieval function so only retrieval errors are retried. On older Emacs versions, it falls back to retrying =url-insert-file-contents= while =package-install-from-archive= is running.
 
-1. Download fails → wait and retry
+1. A retryable download fails → wait using exponential backoff and retry
 2. Package unpack/build fails → show the original error without retrying
-3. Max attempts reached → show the original download error
-4. Success → continue normally
+3. Known permanent failures, such as HTTP 404, are returned immediately
+4. Max attempts reached → show the original download error
+5. Success → continue normally
+
+The default predicate avoids retrying known programming errors, permanent
+HTTP failures, and invalid certificates. Unknown retrieval errors remain
+retryable for compatibility. Set =package-retry-predicate= to a custom
+function when an archive needs a different policy.
 
 ** License
 

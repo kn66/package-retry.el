@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 kn66
 
 ;; Author: Nobuyuki Kamimoto
-;; Version: 1.0.0
+;; Version: 1.1.0
 ;; Package-Requires: ((emacs "24.4"))
 ;; Keywords: convenience, package, network
 ;; URL: https://github.com/kn66/package-retry.el
@@ -57,9 +57,38 @@ Must be at least 1."
   :group 'package-retry)
 
 (defcustom package-retry-delay 3
-  "Delay in seconds between retry attempts.
+  "Initial delay in seconds between retry attempts.
 Must be a non-negative number."
   :type '(number :match (lambda (_widget value) (>= value 0)))
+  :group 'package-retry)
+
+(defcustom package-retry-backoff-factor 2
+  "Multiplier applied to the delay after each failed attempt.
+A value of 1 keeps the delay fixed.  Must be at least 1."
+  :type '(number :match (lambda (_widget value) (>= value 1)))
+  :group 'package-retry)
+
+(defcustom package-retry-max-delay 30
+  "Maximum delay in seconds between retry attempts.
+Set to nil to disable the limit."
+  :type '(choice (const :tag "No limit" nil)
+                 (number :tag "Seconds"
+                         :match (lambda (_widget value) (>= value 0))))
+  :group 'package-retry)
+
+(defcustom package-retry-jitter 0.1
+  "Maximum random variation applied to each retry delay.
+The value is a fraction between 0 and 1.  For example, 0.1 varies
+the calculated delay by up to 10 percent in either direction."
+  :type '(number :match (lambda (_widget value)
+                          (and (>= value 0) (<= value 1))))
+  :group 'package-retry)
+
+(defcustom package-retry-predicate #'package-retry--default-retry-p
+  "Function deciding whether a download error should be retried.
+The function receives the error data from `condition-case' and
+returns non-nil when the operation may be retried."
+  :type 'function
   :group 'package-retry)
 
 (defcustom package-retry-enable-message t
@@ -69,6 +98,39 @@ Must be a non-negative number."
 
 (defvar package-retry--in-package-install nil
   "Non-nil while the compatibility advice handles a package install.")
+
+(defconst package-retry--non-retryable-error-symbols
+  '(args-out-of-range invalid-function user-error void-function
+                      void-variable wrong-type-argument)
+  "Error symbols that normally indicate a permanent local failure.")
+
+(defun package-retry--default-retry-p (err)
+  "Return non-nil when ERR appears suitable for another attempt.
+Known programming errors and permanent HTTP or certificate failures
+are rejected.  Unknown retrieval errors remain retryable."
+  (let ((message-text (downcase (error-message-string err))))
+    (not
+     (or (memq (car err) package-retry--non-retryable-error-symbols)
+         (string-match-p
+          "\\(?:http\\|status\\)[^0-9]*\\(?:400\\|401\\|403\\|404\\|405\\|410\\|422\\)\\b"
+          message-text)
+         (string-match-p
+          "certificate.*\\(?:expired\\|invalid\\|untrusted\\|hostname\\)"
+          message-text)))))
+
+(defun package-retry--retry-delay (attempt)
+  "Return the delay before retrying after ATTEMPT.
+Apply exponential backoff, the configured maximum, and jitter."
+  (let* ((base-delay (max 0 package-retry-delay))
+         (factor (max 1 package-retry-backoff-factor))
+         (calculated (* base-delay (expt factor (1- attempt))))
+         (capped (if package-retry-max-delay
+                     (min calculated (max 0 package-retry-max-delay))
+                   calculated))
+         (jitter (min 1 (max 0 package-retry-jitter)))
+         (random-fraction (/ (float (random 1000000)) 1000000.0))
+         (variation (* capped jitter (- (* 2 random-fraction) 1))))
+    (max 0 (+ capped variation))))
 
 (defun package-retry--download-name (url args)
   "Return a human-readable download name from URL and ARGS."
@@ -82,7 +144,6 @@ Must be a non-negative number."
 When RETRY-P is non-nil, call it with the error data before
 retrying.  If RETRY-P returns nil, signal the error immediately."
   (let ((max-attempts (max 1 package-retry-max-attempts))
-        (delay (max 0 package-retry-delay))
         (attempt 1)
         result
         done)
@@ -91,7 +152,9 @@ retrying.  If RETRY-P returns nil, signal the error immediately."
           (setq result (funcall thunk)
                 done t)
         (error
-         (let ((retryable (if retry-p (funcall retry-p err) t)))
+         (let ((retryable
+                (and (if retry-p (funcall retry-p err) t)
+                     (funcall package-retry-predicate err))))
            (cond
             ((not retryable)
              (signal (car err) (cdr err)))
@@ -103,15 +166,16 @@ retrying.  If RETRY-P returns nil, signal the error immediately."
                 max-attempts download-name))
              (signal (car err) (cdr err)))
             (t
-             (when package-retry-enable-message
-               (message
-                "Package download failed (attempt %d/%d): %s - %s. Retrying in %s seconds..."
-                attempt
-                max-attempts
-                download-name
-                (error-message-string err)
-                delay))
-             (sleep-for delay)
+             (let ((delay (package-retry--retry-delay attempt)))
+               (when package-retry-enable-message
+                 (message
+                  "Package download failed (attempt %d/%d): %s - %s. Retrying in %.2f seconds..."
+                  attempt
+                  max-attempts
+                  download-name
+                  (error-message-string err)
+                  delay))
+               (sleep-for delay))
              (setq attempt (1+ attempt))))))))
     result))
 
@@ -205,8 +269,8 @@ retried according to `package-retry-max-attempts' and
 (defun package-retry-unload-function ()
   "Unload function for package-retry.
 Removes advice and disables mode when package is unloaded."
-  (when package-retry-mode
-    (package-retry-mode -1))
+  (setq package-retry-mode nil)
+  (package-retry--disable)
   ;; Return nil to allow standard unload actions
   nil)
 
